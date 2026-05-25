@@ -94,6 +94,8 @@ export type KanbanBoardRecord = {
   name: string;
   color: string;
   position: number;
+  role: "owner" | "editor";
+  roomId: string;
   createdAt: string;
   updatedAt: string;
   columns: KanbanColumnRecord[];

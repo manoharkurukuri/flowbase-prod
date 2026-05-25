@@ -1,10 +1,22 @@
 "use client";
 
-import { useMemo, useState, useTransition } from "react";
+import { useEffect, useMemo, useState, useTransition } from "react";
+import {
+  ClientSideSuspense,
+  LiveblocksProvider,
+  RoomProvider,
+  useEventListener,
+  useMyPresence,
+  useOthers,
+  useSelf,
+  useThreads,
+} from "@liveblocks/react/suspense";
+import { Composer, Thread } from "@liveblocks/react-ui";
 import {
   AlertTriangle,
   CalendarDays,
   Check,
+  Clock3,
   Columns3,
   Edit3,
   FileText,
@@ -13,12 +25,19 @@ import {
   KanbanSquare,
   Layers3,
   ListPlus,
+  Mail,
+  MessageCircle,
   Palette,
   Plus,
   Save,
+  Send,
+  Settings,
+  Share2,
   Sparkles,
   Tags,
   Trash2,
+  UserPlus,
+  Users,
   X,
 } from "lucide-react";
 import {
@@ -27,10 +46,18 @@ import {
   createKanbanTask,
   deleteKanbanColumn,
   deleteKanbanTask,
+  fetchKanbanBoardCollaboration,
+  fetchKanbanBoards,
+  inviteKanbanBoardCollaborator,
   moveKanbanTask,
   updateKanbanColumn,
   updateKanbanTask,
 } from "@/lib/actions/kanban";
+import {
+  isValidCollaborationEmail,
+  normalizeCollaborationEmail,
+  type CollaborationSummaryRecord,
+} from "@/lib/collaboration";
 import {
   KANBAN_BOARD_COLORS,
   KANBAN_LABELS,
@@ -45,6 +72,7 @@ import {
   type KanbanTaskRecord,
 } from "@/lib/kanban";
 import { cn } from "@/lib/utils";
+import { resolveLiveblocksUsers } from "@/liveblocks.config";
 
 type BoardFormState = {
   name: string;
@@ -73,6 +101,8 @@ type TaskDialogState =
       task: KanbanTaskRecord;
     };
 
+type TaskDialogTab = "details" | "comments";
+
 type TaskFormState = {
   columnId: number;
   title: string;
@@ -92,6 +122,11 @@ type DropTarget = {
 
 type KanbanPageClientProps = {
   initialBoards: KanbanBoardRecord[];
+};
+
+type CollaborationPanelState = CollaborationSummaryRecord & {
+  inviteEmail: string;
+  error: string | null;
 };
 
 function toDateKey(date: Date) {
@@ -242,7 +277,10 @@ export function KanbanPageClient({ initialBoards }: KanbanPageClientProps) {
   const [columnDialog, setColumnDialog] = useState<ColumnDialogState | null>(null);
   const [columnToDelete, setColumnToDelete] = useState<KanbanColumnRecord | null>(null);
   const [taskDialog, setTaskDialog] = useState<TaskDialogState | null>(null);
+  const [taskDialogTab, setTaskDialogTab] = useState<TaskDialogTab>("details");
   const [taskForm, setTaskForm] = useState<TaskFormState>(() => getEmptyTaskForm(0));
+  const [collaborationPanel, setCollaborationPanel] =
+    useState<CollaborationPanelState | null>(null);
   const [draggingTaskId, setDraggingTaskId] = useState<number | null>(null);
   const [dropTarget, setDropTarget] = useState<DropTarget | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -256,6 +294,24 @@ export function KanbanPageClient({ initialBoards }: KanbanPageClientProps) {
     setBoards((current) =>
       current.map((board) => (board.id === boardId ? updater(board) : board))
     );
+  }
+
+  function refreshBoardsFromServer() {
+    startTransition(async () => {
+      try {
+        const nextBoards = await fetchKanbanBoards();
+        setBoards(nextBoards);
+        setSelectedBoardId((current) => {
+          if (current && nextBoards.some((board) => board.id === current)) {
+            return current;
+          }
+
+          return nextBoards[0]?.id ?? null;
+        });
+      } catch (caught) {
+        setError(caught instanceof Error ? caught.message : "Could not refresh the board.");
+      }
+    });
   }
 
   function openBoardDialog() {
@@ -364,12 +420,21 @@ export function KanbanPageClient({ initialBoards }: KanbanPageClientProps) {
   function openCreateTaskDialog(columnId: number) {
     setTaskForm(getEmptyTaskForm(columnId));
     setTaskDialog({ mode: "create", columnId });
+    setTaskDialogTab("details");
     setError(null);
   }
 
   function openEditTaskDialog(task: KanbanTaskRecord) {
     setTaskForm(getTaskForm(task));
     setTaskDialog({ mode: "edit", task });
+    setTaskDialogTab("details");
+    setError(null);
+  }
+
+  function openTaskComments(task: KanbanTaskRecord) {
+    setTaskForm(getTaskForm(task));
+    setTaskDialog({ mode: "edit", task });
+    setTaskDialogTab("comments");
     setError(null);
   }
 
@@ -518,7 +583,91 @@ export function KanbanPageClient({ initialBoards }: KanbanPageClientProps) {
     }));
   }
 
+  function openCollaborationPanel() {
+    if (!selectedBoard) return;
+
+    setCollaborationPanel({
+      boardId: selectedBoard.id,
+      members: [],
+      inviteEmail: "",
+      error: null,
+    });
+
+    startTransition(async () => {
+      try {
+        const collaboration = await fetchKanbanBoardCollaboration(selectedBoard.id);
+        setCollaborationPanel({
+          ...collaboration,
+          inviteEmail: "",
+          error: null,
+        });
+      } catch (caught) {
+        setCollaborationPanel((current) =>
+          current
+            ? {
+                ...current,
+                error:
+                  caught instanceof Error
+                    ? caught.message
+                    : "Could not load collaboration settings.",
+              }
+            : current
+        );
+      }
+    });
+  }
+
+  function updateInviteEmail(email: string) {
+    setCollaborationPanel((current) =>
+      current
+        ? {
+            ...current,
+            inviteEmail: email,
+            error: null,
+          }
+        : current
+    );
+  }
+
+  function handleInviteCollaborator() {
+    if (!collaborationPanel) return;
+
+    const email = normalizeCollaborationEmail(collaborationPanel.inviteEmail);
+
+    if (!isValidCollaborationEmail(email)) {
+      setCollaborationPanel({
+        ...collaborationPanel,
+        error: "Add a valid email address.",
+      });
+      return;
+    }
+
+    startTransition(async () => {
+      try {
+        const collaboration = await inviteKanbanBoardCollaborator(
+          collaborationPanel.boardId,
+          email
+        );
+        setCollaborationPanel({
+          ...collaboration,
+          inviteEmail: "",
+          error: null,
+        });
+      } catch (caught) {
+        setCollaborationPanel((current) =>
+          current
+            ? {
+                ...current,
+                error: caught instanceof Error ? caught.message : "Could not send that invite.",
+              }
+            : current
+        );
+      }
+    });
+  }
+
   return (
+    <LiveblocksProvider authEndpoint="/api/liveblocks-auth" resolveUsers={resolveLiveblocksUsers}>
     <div className="min-h-full p-4 sm:p-6 lg:p-8">
       <div className="mx-auto flex w-full max-w-[1440px] flex-col gap-5">
         <header className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
@@ -632,88 +781,60 @@ export function KanbanPageClient({ initialBoards }: KanbanPageClientProps) {
             </div>
           </aside>
 
-          <section className="min-w-0 overflow-hidden rounded-2xl border border-violet-100 bg-white shadow-sm">
-            {selectedBoard ? (
-              <>
-                <div className="flex flex-col gap-3 border-b border-slate-100 px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
-                  <div className="min-w-0">
-                    <div className="mb-1 flex items-center gap-2">
-                      <span
-                        className="h-3 w-3 rounded-full shadow-sm"
-                        style={{ backgroundColor: selectedBoard.color }}
-                      />
-                      <h2 className="truncate text-[18px] font-bold text-indigo-950">
-                        {selectedBoard.name}
-                      </h2>
-                    </div>
-                    <p className="text-[11px] text-slate-400">
-                      {selectedBoard.columns.length} of {MAX_KANBAN_COLUMNS} columns /{" "}
-                      {getBoardTaskCount(selectedBoard)} active tasks
-                    </p>
-                  </div>
-                  <button
-                    onClick={openCreateColumnDialog}
-                    disabled={selectedBoard.columns.length >= MAX_KANBAN_COLUMNS}
-                    className="inline-flex items-center justify-center gap-2 rounded-xl border border-orange-100 bg-orange-50 px-3.5 py-2 text-[11.5px] font-semibold text-orange-600 transition hover:bg-orange-100 disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    <ListPlus size={14} />
-                    Add column
-                  </button>
-                </div>
+          {selectedBoard ? (
+            <RoomProvider
+              key={selectedBoard.roomId}
+              id={selectedBoard.roomId}
+              initialPresence={{
+                mode: "viewing",
+                activeTaskId: null,
+                status: "Viewing board",
+              }}
+            >
+              <ClientSideSuspense fallback={<KanbanBoardLoadingSection board={selectedBoard} />}>
+                <KanbanRoomBridge
+                  boardId={selectedBoard.id}
+                  onRemoteBoardChange={refreshBoardsFromServer}
+                >
+                  <KanbanBoardRoomSection
+                    board={selectedBoard}
+                    draggingTaskId={draggingTaskId}
+                    dropTarget={dropTarget}
+                    onAddColumn={openCreateColumnDialog}
+                    onOpenCollaboration={openCollaborationPanel}
+                    onAddTask={openCreateTaskDialog}
+                    onEditColumn={openEditColumnDialog}
+                    onDeleteColumn={setColumnToDelete}
+                    onDragStart={handleDragStart}
+                    onTaskDragOver={handleTaskDragOver}
+                    onColumnDragOver={handleColumnDragOver}
+                    onDrop={handleDrop}
+                    onEditTask={openEditTaskDialog}
+                    onOpenTaskComments={openTaskComments}
+                  />
 
-                <div className="min-w-0 overflow-x-auto p-4">
-                  <div className="flex min-h-[560px] w-max min-w-full gap-4 pb-2">
-                    {selectedBoard.columns.map((column) => (
-                      <KanbanColumn
-                        key={column.id}
-                        column={column}
-                        draggingTaskId={draggingTaskId}
-                        dropTarget={dropTarget}
-                        onAddTask={() => openCreateTaskDialog(column.id)}
-                        onEditColumn={() => openEditColumnDialog(column)}
-                        onDeleteColumn={() => setColumnToDelete(column)}
-                        onDragStart={handleDragStart}
-                        onTaskDragOver={handleTaskDragOver}
-                        onColumnDragOver={handleColumnDragOver}
-                        onDrop={handleDrop}
-                        onEditTask={openEditTaskDialog}
-                      />
-                    ))}
-
-                    {selectedBoard.columns.length < MAX_KANBAN_COLUMNS && (
-                      <button
-                        onClick={openCreateColumnDialog}
-                        className="flex min-h-[180px] w-[280px] shrink-0 flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-orange-200 bg-orange-50/60 p-4 text-[12px] font-semibold text-orange-500 transition hover:border-orange-300 hover:bg-orange-50"
-                      >
-                        <Plus size={18} />
-                        Add another column
-                      </button>
-                    )}
-                  </div>
-                </div>
-              </>
-            ) : (
-              <div className="flex min-h-[560px] items-center justify-center p-8">
-                <div className="max-w-sm text-center">
-                  <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-2xl bg-orange-50 text-orange-500 shadow-sm">
-                    <KanbanSquare size={22} />
-                  </div>
-                  <h2 className="text-[20px] font-bold text-indigo-950">Create your first board</h2>
-                  <p className="mt-2 text-[13px] leading-6 text-slate-400">
-                    Boards keep related tasks together with custom colors, columns, labels,
-                    and calendar sync.
-                  </p>
-                  <button
-                    onClick={openBoardDialog}
-                    className="mx-auto mt-5 inline-flex items-center gap-2 rounded-xl bg-violet-600 px-4 py-2.5 text-[12px] font-semibold text-white shadow-sm transition hover:bg-violet-700"
-                  >
-                    <Plus size={14} />
-                    New board
-                  </button>
-                </div>
-              </div>
-            )}
-          </section>
+                  {taskDialog && (
+                    <TaskDialogModal
+                      boardId={selectedBoard.id}
+                      taskDialog={taskDialog}
+                      taskDialogTab={taskDialogTab}
+                      taskForm={taskForm}
+                      error={error}
+                      isPending={isPending}
+                      onSetTaskForm={setTaskForm}
+                      onSetTaskDialogTab={setTaskDialogTab}
+                      onClose={() => setTaskDialog(null)}
+                      onToggleLabel={toggleLabel}
+                      onDeleteTask={handleDeleteTask}
+                      onSaveTask={handleSaveTask}
+                    />
+                  )}
+                </KanbanRoomBridge>
+              </ClientSideSuspense>
+            </RoomProvider>
+          ) : (
+            <EmptyKanbanBoardSection onNewBoard={openBoardDialog} />
+          )}
         </div>
       </div>
 
@@ -805,169 +926,6 @@ export function KanbanPageClient({ initialBoards }: KanbanPageClientProps) {
         </DialogShell>
       )}
 
-      {taskDialog && (
-        <DialogShell
-          title={taskDialog.mode === "create" ? "New task" : "Edit task"}
-          description="Add the details that should stay visible on the card."
-          icon={<Flag size={16} className="text-orange-500" />}
-          onClose={() => setTaskDialog(null)}
-          wide
-        >
-          <div className="space-y-4">
-            <label className="block">
-              <span className="mb-1.5 block text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-400">
-                Title
-              </span>
-              <input
-                value={taskForm.title}
-                onChange={(event) => setTaskForm({ ...taskForm, title: event.target.value })}
-                placeholder="Draft weekly review"
-                className="h-10 w-full rounded-xl border border-slate-200 bg-white px-3 text-[13px] text-slate-700 outline-none transition placeholder:text-slate-300 focus:border-violet-300 focus:ring-4 focus:ring-violet-100"
-              />
-            </label>
-
-            <label className="block">
-              <span className="mb-1.5 block text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-400">
-                Description
-              </span>
-              <textarea
-                value={taskForm.description}
-                onChange={(event) =>
-                  setTaskForm({ ...taskForm, description: event.target.value })
-                }
-                placeholder="Notes, links, or next steps"
-                rows={3}
-                className="w-full resize-none rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-[13px] leading-5 text-slate-700 outline-none transition placeholder:text-slate-300 focus:border-violet-300 focus:ring-4 focus:ring-violet-100"
-              />
-            </label>
-
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-[1fr_180px]">
-              <label className="block">
-                <span className="mb-1.5 block text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-400">
-                  Due date
-                </span>
-                <input
-                  type="date"
-                  value={taskForm.dueDate}
-                  onChange={(event) => setTaskForm({ ...taskForm, dueDate: event.target.value })}
-                  className="h-10 w-full rounded-xl border border-slate-200 bg-white px-3 text-[13px] font-medium text-slate-700 outline-none transition focus:border-violet-300 focus:ring-4 focus:ring-violet-100"
-                />
-              </label>
-
-              <label className="block">
-                <span className="mb-1.5 block text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-400">
-                  Priority
-                </span>
-                <select
-                  value={taskForm.priority}
-                  onChange={(event) =>
-                    setTaskForm({
-                      ...taskForm,
-                      priority: event.target.value as KanbanPriority,
-                    })
-                  }
-                  className="h-10 w-full rounded-xl border border-slate-200 bg-white px-3 text-[13px] font-medium text-slate-700 outline-none transition focus:border-violet-300 focus:ring-4 focus:ring-violet-100"
-                >
-                  {KANBAN_PRIORITIES.map((priority) => (
-                    <option key={priority} value={priority}>
-                      {priority}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            </div>
-
-            <div>
-              <span className="mb-2 block text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-400">
-                Labels
-              </span>
-              <div className="flex flex-wrap gap-2">
-                {KANBAN_LABELS.map((label) => {
-                  const selected = taskForm.labelIds.includes(label.id);
-
-                  return (
-                    <button
-                      key={label.id}
-                      onClick={() => toggleLabel(label.id)}
-                      className={cn(
-                        "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1.5 text-[11px] font-semibold transition",
-                        selected && "shadow-sm"
-                      )}
-                      style={{
-                        borderColor: label.border,
-                        backgroundColor: selected ? label.bg : "#ffffff",
-                        color: label.color,
-                      }}
-                    >
-                      {selected && <Check size={11} />}
-                      {label.label}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-              <ToggleRow
-                checked={taskForm.syncToCalendar}
-                icon={<CalendarDays size={14} className="text-cyan-500" />}
-                title="Sync with Calendar"
-                onChange={() =>
-                  setTaskForm((current) => ({
-                    ...current,
-                    syncToCalendar: !current.syncToCalendar,
-                  }))
-                }
-              />
-              <ToggleRow
-                checked={taskForm.linkedToNotes}
-                icon={<FileText size={14} className="text-yellow-500" />}
-                title="Link with Notes"
-                onChange={() =>
-                  setTaskForm((current) => ({
-                    ...current,
-                    linkedToNotes: !current.linkedToNotes,
-                  }))
-                }
-              />
-            </div>
-
-            {error && <DialogError message={error} />}
-
-            <div className="flex flex-col-reverse gap-2 border-t border-slate-100 pt-4 sm:flex-row sm:items-center sm:justify-between">
-              <div>
-                {taskDialog.mode === "edit" && (
-                  <button
-                    onClick={handleDeleteTask}
-                    disabled={isPending}
-                    className="inline-flex items-center gap-2 rounded-xl px-3 py-2 text-[11.5px] font-semibold text-rose-500 transition hover:bg-rose-50 disabled:opacity-60"
-                  >
-                    <Trash2 size={13} />
-                    Delete
-                  </button>
-                )}
-              </div>
-              <div className="flex flex-col gap-2 sm:flex-row">
-                <button
-                  onClick={() => setTaskDialog(null)}
-                  className="inline-flex items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-[11.5px] font-semibold text-slate-500 transition hover:bg-slate-50"
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={handleSaveTask}
-                  disabled={isPending}
-                  className="inline-flex items-center justify-center gap-2 rounded-xl bg-violet-600 px-3.5 py-2 text-[11.5px] font-semibold text-white shadow-sm transition hover:bg-violet-700 disabled:opacity-60"
-                >
-                  <Save size={13} />
-                  Save task
-                </button>
-              </div>
-            </div>
-          </div>
-        </DialogShell>
-      )}
-
       {columnToDelete && (
         <DialogShell
           title="Delete column"
@@ -999,12 +957,277 @@ export function KanbanPageClient({ initialBoards }: KanbanPageClientProps) {
           </div>
         </DialogShell>
       )}
+
+      {collaborationPanel && selectedBoard && (
+        <CollaborationPanel
+          board={selectedBoard}
+          collaboration={collaborationPanel}
+          isPending={isPending}
+          onClose={() => setCollaborationPanel(null)}
+          onInviteEmailChange={updateInviteEmail}
+          onInvite={handleInviteCollaborator}
+        />
+      )}
+    </div>
+    </LiveblocksProvider>
+  );
+}
+
+function KanbanRoomBridge({
+  boardId,
+  onRemoteBoardChange,
+  children,
+}: {
+  boardId: number;
+  onRemoteBoardChange: () => void;
+  children: React.ReactNode;
+}) {
+  const [, updateMyPresence] = useMyPresence();
+
+  useEffect(() => {
+    updateMyPresence({
+      mode: "viewing",
+      activeTaskId: null,
+      status: "Viewing board",
+    });
+  }, [boardId, updateMyPresence]);
+
+  useEventListener(({ event }: { event: { type: string; boardId?: number } }) => {
+    if (
+      (event.type === "KANBAN_BOARD_CHANGED" || event.type === "KANBAN_MEMBERS_CHANGED") &&
+      event.boardId === boardId
+    ) {
+      onRemoteBoardChange();
+    }
+  });
+
+  return <>{children}</>;
+}
+
+function KanbanBoardLoadingSection({ board }: { board: KanbanBoardRecord }) {
+  return (
+    <section className="min-w-0 overflow-hidden rounded-2xl border border-violet-100 bg-white shadow-sm">
+      <div className="flex min-h-[560px] items-center justify-center p-8">
+        <div className="max-w-sm text-center">
+          <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-2xl bg-violet-50 text-violet-500 shadow-sm">
+            <Users size={22} />
+          </div>
+          <h2 className="text-[18px] font-bold text-indigo-950">{board.name}</h2>
+          <p className="mt-2 text-[12px] leading-5 text-slate-400">
+            Opening the collaboration room...
+          </p>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function EmptyKanbanBoardSection({ onNewBoard }: { onNewBoard: () => void }) {
+  return (
+    <section className="min-w-0 overflow-hidden rounded-2xl border border-violet-100 bg-white shadow-sm">
+      <div className="flex min-h-[560px] items-center justify-center p-8">
+        <div className="max-w-sm text-center">
+          <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-2xl bg-orange-50 text-orange-500 shadow-sm">
+            <KanbanSquare size={22} />
+          </div>
+          <h2 className="text-[20px] font-bold text-indigo-950">Create your first board</h2>
+          <p className="mt-2 text-[13px] leading-6 text-slate-400">
+            Boards keep related tasks together with custom colors, columns, labels, and calendar
+            sync.
+          </p>
+          <button
+            onClick={onNewBoard}
+            className="mx-auto mt-5 inline-flex items-center gap-2 rounded-xl bg-violet-600 px-4 py-2.5 text-[12px] font-semibold text-white shadow-sm transition hover:bg-violet-700"
+          >
+            <Plus size={14} />
+            New board
+          </button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function KanbanBoardRoomSection({
+  board,
+  draggingTaskId,
+  dropTarget,
+  onAddColumn,
+  onOpenCollaboration,
+  onAddTask,
+  onEditColumn,
+  onDeleteColumn,
+  onDragStart,
+  onTaskDragOver,
+  onColumnDragOver,
+  onDrop,
+  onEditTask,
+  onOpenTaskComments,
+}: {
+  board: KanbanBoardRecord;
+  draggingTaskId: number | null;
+  dropTarget: DropTarget | null;
+  onAddColumn: () => void;
+  onOpenCollaboration: () => void;
+  onAddTask: (columnId: number) => void;
+  onEditColumn: (column: KanbanColumnRecord) => void;
+  onDeleteColumn: (column: KanbanColumnRecord) => void;
+  onDragStart: (event: React.DragEvent, task: KanbanTaskRecord) => void;
+  onTaskDragOver: (event: React.DragEvent, columnId: number, taskId: number) => void;
+  onColumnDragOver: (event: React.DragEvent, columnId: number) => void;
+  onDrop: (event: React.DragEvent, fallbackColumnId: number) => void;
+  onEditTask: (task: KanbanTaskRecord) => void;
+  onOpenTaskComments: (task: KanbanTaskRecord) => void;
+}) {
+  const { threads } = useThreads({
+    query: {
+      metadata: {
+        kind: "kanban-task",
+        boardId: board.id,
+      },
+    },
+  });
+  const commentCounts = useMemo(() => {
+    const counts = new Map<number, number>();
+
+    for (const thread of threads) {
+      const taskId = Number(thread.metadata?.taskId);
+      if (!Number.isInteger(taskId)) continue;
+
+      counts.set(taskId, (counts.get(taskId) ?? 0) + (thread.comments?.length ?? 0));
+    }
+
+    return counts;
+  }, [threads]);
+
+  return (
+    <section className="min-w-0 overflow-hidden rounded-2xl border border-violet-100 bg-white shadow-sm">
+      <div className="flex flex-col gap-3 border-b border-slate-100 px-4 py-4 lg:flex-row lg:items-center lg:justify-between">
+        <div className="min-w-0">
+          <div className="mb-1 flex items-center gap-2">
+            <span className="h-3 w-3 rounded-full shadow-sm" style={{ backgroundColor: board.color }} />
+            <h2 className="truncate text-[18px] font-bold text-indigo-950">{board.name}</h2>
+            {board.role === "editor" && (
+              <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.08em] text-emerald-600">
+                Shared
+              </span>
+            )}
+          </div>
+          <p className="text-[11px] text-slate-400">
+            {board.columns.length} of {MAX_KANBAN_COLUMNS} columns / {getBoardTaskCount(board)}{" "}
+            active tasks
+          </p>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <ActiveCollaborators />
+          <button
+            onClick={onOpenCollaboration}
+            className="inline-flex items-center justify-center gap-2 rounded-xl border border-violet-100 bg-violet-50 px-3.5 py-2 text-[11.5px] font-semibold text-violet-600 transition hover:border-violet-200 hover:bg-violet-100"
+          >
+            <Settings size={14} />
+            Collaboration
+          </button>
+          <button
+            onClick={onAddColumn}
+            disabled={board.columns.length >= MAX_KANBAN_COLUMNS}
+            className="inline-flex items-center justify-center gap-2 rounded-xl border border-orange-100 bg-orange-50 px-3.5 py-2 text-[11.5px] font-semibold text-orange-600 transition hover:bg-orange-100 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <ListPlus size={14} />
+            Add column
+          </button>
+        </div>
+      </div>
+
+      <div className="min-w-0 overflow-x-auto p-4">
+        <div className="flex min-h-[560px] w-max min-w-full gap-4 pb-2">
+          {board.columns.map((column) => (
+            <KanbanColumn
+              key={column.id}
+              column={column}
+              commentCounts={commentCounts}
+              draggingTaskId={draggingTaskId}
+              dropTarget={dropTarget}
+              onAddTask={() => onAddTask(column.id)}
+              onEditColumn={() => onEditColumn(column)}
+              onDeleteColumn={() => onDeleteColumn(column)}
+              onDragStart={onDragStart}
+              onTaskDragOver={onTaskDragOver}
+              onColumnDragOver={onColumnDragOver}
+              onDrop={onDrop}
+              onEditTask={onEditTask}
+              onOpenTaskComments={onOpenTaskComments}
+            />
+          ))}
+
+          {board.columns.length < MAX_KANBAN_COLUMNS && (
+            <button
+              onClick={onAddColumn}
+              className="flex min-h-[180px] w-[280px] shrink-0 flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-orange-200 bg-orange-50/60 p-4 text-[12px] font-semibold text-orange-500 transition hover:border-orange-300 hover:bg-orange-50"
+            >
+              <Plus size={18} />
+              Add another column
+            </button>
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function ActiveCollaborators() {
+  const self = useSelf();
+  const others = useOthers();
+  const collaborators = [
+    self
+      ? {
+          id: self.id,
+          info: self.info,
+          presence: self.presence,
+          isSelf: true,
+        }
+      : null,
+    ...others.map((other: any) => ({
+      id: other.id,
+      info: other.info,
+      presence: other.presence,
+      isSelf: false,
+    })),
+  ].filter(Boolean);
+
+  return (
+    <div className="flex items-center gap-2 rounded-xl border border-slate-100 bg-white px-2.5 py-1.5 shadow-sm">
+      <div className="flex -space-x-2">
+        {collaborators.slice(0, 5).map((collaborator) => {
+          if (!collaborator) return null;
+
+          const label = collaborator.isSelf
+            ? `${collaborator.info.name} (you)`
+            : collaborator.info.name;
+
+          return (
+            <span
+              key={`${collaborator.id}-${collaborator.isSelf ? "self" : "other"}`}
+              title={`${label} - ${collaborator.presence.status ?? "Active"}`}
+              className="relative flex h-8 w-8 items-center justify-center rounded-full border-2 border-white text-[10.5px] font-bold text-white shadow-sm"
+              style={{ backgroundColor: collaborator.info.color }}
+            >
+              {collaborator.info.initials}
+              <span className="absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full border-2 border-white bg-emerald-400" />
+            </span>
+          );
+        })}
+      </div>
+      <span className="whitespace-nowrap text-[11px] font-semibold text-slate-500">
+        {collaborators.length} active
+      </span>
     </div>
   );
 }
 
 function KanbanColumn({
   column,
+  commentCounts,
   draggingTaskId,
   dropTarget,
   onAddTask,
@@ -1015,8 +1238,10 @@ function KanbanColumn({
   onColumnDragOver,
   onDrop,
   onEditTask,
+  onOpenTaskComments,
 }: {
   column: KanbanColumnRecord;
+  commentCounts: Map<number, number>;
   draggingTaskId: number | null;
   dropTarget: DropTarget | null;
   onAddTask: () => void;
@@ -1027,6 +1252,7 @@ function KanbanColumn({
   onColumnDragOver: (event: React.DragEvent, columnId: number) => void;
   onDrop: (event: React.DragEvent, fallbackColumnId: number) => void;
   onEditTask: (task: KanbanTaskRecord) => void;
+  onOpenTaskComments: (task: KanbanTaskRecord) => void;
 }) {
   const isColumnDropTarget = dropTarget?.columnId === column.id;
 
@@ -1089,10 +1315,12 @@ function KanbanColumn({
               dropTarget.position === "before" && <DropLine />}
             <TaskCard
               task={task}
+              commentCount={commentCounts.get(task.id) ?? 0}
               isDragging={draggingTaskId === task.id}
               onDragStart={onDragStart}
               onDragOver={(event) => onTaskDragOver(event, column.id, task.id)}
               onClick={() => onEditTask(task)}
+              onCommentClick={() => onOpenTaskComments(task)}
             />
             {dropTarget?.columnId === column.id &&
               dropTarget.taskId === task.id &&
@@ -1108,16 +1336,20 @@ function KanbanColumn({
 
 function TaskCard({
   task,
+  commentCount,
   isDragging,
   onDragStart,
   onDragOver,
   onClick,
+  onCommentClick,
 }: {
   task: KanbanTaskRecord;
+  commentCount: number;
   isDragging: boolean;
   onDragStart: (event: React.DragEvent, task: KanbanTaskRecord) => void;
   onDragOver: (event: React.DragEvent) => void;
   onClick: () => void;
+  onCommentClick: () => void;
 }) {
   const priority = getPriorityMeta(task.priority);
 
@@ -1207,12 +1439,498 @@ function TaskCard({
           )}
         </div>
       )}
+
+      <div className="mt-2 flex items-center justify-between border-t border-slate-50 pt-2">
+        <button
+          type="button"
+          onClick={(event) => {
+            event.stopPropagation();
+            onCommentClick();
+          }}
+          className={cn(
+            "inline-flex items-center gap-1.5 rounded-full px-2 py-1 text-[10.5px] font-semibold transition",
+            commentCount > 0
+              ? "bg-violet-50 text-violet-600 hover:bg-violet-100"
+              : "bg-slate-50 text-slate-400 hover:bg-violet-50 hover:text-violet-600"
+          )}
+          aria-label={`Open comments for ${task.title}`}
+        >
+          <MessageCircle size={10} />
+          {commentCount}
+        </button>
+        <span className="text-[10px] font-medium text-slate-300">Discuss</span>
+      </div>
     </div>
   );
 }
 
 function DropLine() {
   return <div className="my-1 h-2 rounded-full bg-orange-300/80 shadow-sm" />;
+}
+
+function TaskDialogModal({
+  boardId,
+  taskDialog,
+  taskDialogTab,
+  taskForm,
+  error,
+  isPending,
+  onSetTaskForm,
+  onSetTaskDialogTab,
+  onClose,
+  onToggleLabel,
+  onDeleteTask,
+  onSaveTask,
+}: {
+  boardId: number;
+  taskDialog: TaskDialogState;
+  taskDialogTab: TaskDialogTab;
+  taskForm: TaskFormState;
+  error: string | null;
+  isPending: boolean;
+  onSetTaskForm: React.Dispatch<React.SetStateAction<TaskFormState>>;
+  onSetTaskDialogTab: (tab: TaskDialogTab) => void;
+  onClose: () => void;
+  onToggleLabel: (labelId: string) => void;
+  onDeleteTask: () => void;
+  onSaveTask: () => void;
+}) {
+  const canShowComments = taskDialog.mode === "edit";
+
+  return (
+    <DialogShell
+      title={taskDialog.mode === "create" ? "New task" : "Task details"}
+      description={
+        taskDialogTab === "comments"
+          ? "Discuss this task with everyone on the board."
+          : "Add the details that should stay visible on the card."
+      }
+      icon={
+        taskDialogTab === "comments" ? (
+          <MessageCircle size={16} className="text-violet-500" />
+        ) : (
+          <Flag size={16} className="text-orange-500" />
+        )
+      }
+      onClose={onClose}
+      wide
+    >
+      <div className="space-y-4">
+        {canShowComments && (
+          <div className="grid grid-cols-2 rounded-xl bg-slate-50 p-1">
+            <button
+              onClick={() => onSetTaskDialogTab("details")}
+              className={cn(
+                "rounded-lg px-3 py-2 text-[11.5px] font-bold transition",
+                taskDialogTab === "details"
+                  ? "bg-white text-violet-600 shadow-sm"
+                  : "text-slate-400 hover:text-slate-600"
+              )}
+            >
+              Details
+            </button>
+            <button
+              onClick={() => onSetTaskDialogTab("comments")}
+              className={cn(
+                "rounded-lg px-3 py-2 text-[11.5px] font-bold transition",
+                taskDialogTab === "comments"
+                  ? "bg-white text-violet-600 shadow-sm"
+                  : "text-slate-400 hover:text-slate-600"
+              )}
+            >
+              Comments
+            </button>
+          </div>
+        )}
+
+        {taskDialogTab === "comments" && canShowComments ? (
+          <TaskComments boardId={boardId} task={taskDialog.task} />
+        ) : (
+          <>
+            <label className="block">
+              <span className="mb-1.5 block text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-400">
+                Title
+              </span>
+              <input
+                value={taskForm.title}
+                onChange={(event) =>
+                  onSetTaskForm((current) => ({ ...current, title: event.target.value }))
+                }
+                placeholder="Draft weekly review"
+                className="h-10 w-full rounded-xl border border-slate-200 bg-white px-3 text-[13px] text-slate-700 outline-none transition placeholder:text-slate-300 focus:border-violet-300 focus:ring-4 focus:ring-violet-100"
+              />
+            </label>
+
+            <label className="block">
+              <span className="mb-1.5 block text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-400">
+                Description
+              </span>
+              <textarea
+                value={taskForm.description}
+                onChange={(event) =>
+                  onSetTaskForm((current) => ({
+                    ...current,
+                    description: event.target.value,
+                  }))
+                }
+                placeholder="Notes, links, or next steps"
+                rows={3}
+                className="w-full resize-none rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-[13px] leading-5 text-slate-700 outline-none transition placeholder:text-slate-300 focus:border-violet-300 focus:ring-4 focus:ring-violet-100"
+              />
+            </label>
+
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-[1fr_180px]">
+              <label className="block">
+                <span className="mb-1.5 block text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-400">
+                  Due date
+                </span>
+                <input
+                  type="date"
+                  value={taskForm.dueDate}
+                  onChange={(event) =>
+                    onSetTaskForm((current) => ({ ...current, dueDate: event.target.value }))
+                  }
+                  className="h-10 w-full rounded-xl border border-slate-200 bg-white px-3 text-[13px] font-medium text-slate-700 outline-none transition focus:border-violet-300 focus:ring-4 focus:ring-violet-100"
+                />
+              </label>
+
+              <label className="block">
+                <span className="mb-1.5 block text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-400">
+                  Priority
+                </span>
+                <select
+                  value={taskForm.priority}
+                  onChange={(event) =>
+                    onSetTaskForm((current) => ({
+                      ...current,
+                      priority: event.target.value as KanbanPriority,
+                    }))
+                  }
+                  className="h-10 w-full rounded-xl border border-slate-200 bg-white px-3 text-[13px] font-medium text-slate-700 outline-none transition focus:border-violet-300 focus:ring-4 focus:ring-violet-100"
+                >
+                  {KANBAN_PRIORITIES.map((priority) => (
+                    <option key={priority} value={priority}>
+                      {priority}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+
+            <div>
+              <span className="mb-2 block text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-400">
+                Labels
+              </span>
+              <div className="flex flex-wrap gap-2">
+                {KANBAN_LABELS.map((label) => {
+                  const selected = taskForm.labelIds.includes(label.id);
+
+                  return (
+                    <button
+                      key={label.id}
+                      onClick={() => onToggleLabel(label.id)}
+                      className={cn(
+                        "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1.5 text-[11px] font-semibold transition",
+                        selected && "shadow-sm"
+                      )}
+                      style={{
+                        borderColor: label.border,
+                        backgroundColor: selected ? label.bg : "#ffffff",
+                        color: label.color,
+                      }}
+                    >
+                      {selected && <Check size={11} />}
+                      {label.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <ToggleRow
+                checked={taskForm.syncToCalendar}
+                icon={<CalendarDays size={14} className="text-cyan-500" />}
+                title="Sync with Calendar"
+                onChange={() =>
+                  onSetTaskForm((current) => ({
+                    ...current,
+                    syncToCalendar: !current.syncToCalendar,
+                  }))
+                }
+              />
+              <ToggleRow
+                checked={taskForm.linkedToNotes}
+                icon={<FileText size={14} className="text-yellow-500" />}
+                title="Link with Notes"
+                onChange={() =>
+                  onSetTaskForm((current) => ({
+                    ...current,
+                    linkedToNotes: !current.linkedToNotes,
+                  }))
+                }
+              />
+            </div>
+          </>
+        )}
+
+        {error && <DialogError message={error} />}
+
+        <div className="flex flex-col-reverse gap-2 border-t border-slate-100 pt-4 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            {taskDialog.mode === "edit" && (
+              <button
+                onClick={onDeleteTask}
+                disabled={isPending}
+                className="inline-flex items-center gap-2 rounded-xl px-3 py-2 text-[11.5px] font-semibold text-rose-500 transition hover:bg-rose-50 disabled:opacity-60"
+              >
+                <Trash2 size={13} />
+                Delete
+              </button>
+            )}
+          </div>
+          <div className="flex flex-col gap-2 sm:flex-row">
+            <button
+              onClick={onClose}
+              className="inline-flex items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-[11.5px] font-semibold text-slate-500 transition hover:bg-slate-50"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={onSaveTask}
+              disabled={isPending}
+              className="inline-flex items-center justify-center gap-2 rounded-xl bg-violet-600 px-3.5 py-2 text-[11.5px] font-semibold text-white shadow-sm transition hover:bg-violet-700 disabled:opacity-60"
+            >
+              <Save size={13} />
+              Save task
+            </button>
+          </div>
+        </div>
+      </div>
+    </DialogShell>
+  );
+}
+
+function TaskComments({ boardId, task }: { boardId: number; task: KanbanTaskRecord }) {
+  const [, updateMyPresence] = useMyPresence();
+  const { threads } = useThreads({
+    query: {
+      metadata: {
+        kind: "kanban-task",
+        boardId,
+        taskId: task.id,
+      },
+    },
+  });
+
+  useEffect(() => {
+    updateMyPresence({
+      mode: "commenting",
+      activeTaskId: task.id,
+      status: `Commenting on ${task.title}`,
+    });
+
+    return () => {
+      updateMyPresence({
+        mode: "viewing",
+        activeTaskId: null,
+        status: "Viewing board",
+      });
+    };
+  }, [task.id, task.title, updateMyPresence]);
+
+  return (
+    <div className="space-y-3">
+      {threads.length === 0 ? (
+        <div className="rounded-2xl border border-dashed border-violet-100 bg-violet-50/50 px-4 py-6 text-center">
+          <MessageCircle size={18} className="mx-auto mb-2 text-violet-500" />
+          <p className="text-[12px] font-bold text-indigo-950">No comments yet</p>
+          <p className="mt-1 text-[11px] leading-5 text-slate-400">
+            Start a focused thread for this task.
+          </p>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {threads.map((thread: any) => (
+            <div key={thread.id} className="rounded-2xl border border-slate-100 bg-white p-2">
+              <Thread thread={thread} showComposer="collapsed" />
+            </div>
+          ))}
+        </div>
+      )}
+
+      {threads.length === 0 && (
+        <div className="rounded-2xl border border-slate-100 bg-white p-2">
+          <Composer
+            metadata={{
+              kind: "kanban-task",
+              boardId,
+              taskId: task.id,
+            }}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CollaborationPanel({
+  board,
+  collaboration,
+  isPending,
+  onClose,
+  onInviteEmailChange,
+  onInvite,
+}: {
+  board: KanbanBoardRecord;
+  collaboration: CollaborationPanelState;
+  isPending: boolean;
+  onClose: () => void;
+  onInviteEmailChange: (email: string) => void;
+  onInvite: () => void;
+}) {
+  const canInvite = board.role === "owner";
+  const activeMembers = collaboration.members.filter((member) => member.status === "active");
+  const pendingMembers = collaboration.members.filter((member) => member.status === "pending");
+
+  return (
+    <div className="fixed inset-0 z-50 flex justify-end bg-indigo-950/20 p-3 backdrop-blur-sm sm:p-4">
+      <aside className="flex h-full w-full max-w-md flex-col overflow-hidden rounded-2xl border border-violet-100 bg-white shadow-lg">
+        <div className="flex items-start justify-between gap-3 border-b border-slate-100 px-5 py-4">
+          <div className="min-w-0">
+            <div className="mb-1 flex items-center gap-2">
+              <Share2 size={16} className="text-violet-500" />
+              <h2 className="text-[16px] font-bold text-indigo-950">Settings / Collaboration</h2>
+            </div>
+            <p className="text-[11px] leading-5 text-slate-400">
+              Manage who can collaborate on {board.name}.
+            </p>
+          </div>
+          <button
+            onClick={onClose}
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-slate-400 transition hover:bg-slate-50 hover:text-slate-600"
+            aria-label="Close collaboration panel"
+          >
+            <X size={16} />
+          </button>
+        </div>
+
+        <div className="flex-1 space-y-5 overflow-y-auto px-5 py-5">
+          <div>
+            <div className="mb-3 flex items-center justify-between">
+              <h3 className="text-[12px] font-bold uppercase tracking-[0.12em] text-slate-400">
+                Shared with
+              </h3>
+              <span className="rounded-full bg-violet-50 px-2 py-1 text-[10.5px] font-bold text-violet-600">
+                {collaboration.members.length} people
+              </span>
+            </div>
+
+            <div className="space-y-2">
+              {activeMembers.map((member) => (
+                <CollaboratorRow key={member.id} member={member} />
+              ))}
+              {pendingMembers.length > 0 && (
+                <div className="pt-2">
+                  <div className="mb-2 flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-[0.12em] text-slate-300">
+                    <Clock3 size={12} />
+                    Pending
+                  </div>
+                  <div className="space-y-2">
+                    {pendingMembers.map((member) => (
+                      <CollaboratorRow key={member.id} member={member} />
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="rounded-2xl border border-violet-100 bg-violet-50/50 p-4">
+            <div className="mb-3 flex items-center gap-2">
+              <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-white text-violet-500 shadow-sm">
+                <UserPlus size={15} />
+              </span>
+              <div>
+                <h3 className="text-[13px] font-bold text-indigo-950">Invite by email</h3>
+                <p className="text-[11px] text-slate-400">Editors can update tasks and comments.</p>
+              </div>
+            </div>
+
+            {canInvite ? (
+              <div className="flex flex-col gap-2 sm:flex-row">
+                <label className="relative min-w-0 flex-1">
+                  <Mail
+                    size={14}
+                    className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-300"
+                  />
+                  <input
+                    value={collaboration.inviteEmail}
+                    onChange={(event) => onInviteEmailChange(event.target.value)}
+                    placeholder="teammate@example.com"
+                    className="h-10 w-full rounded-xl border border-slate-200 bg-white pl-9 pr-3 text-[13px] text-slate-700 outline-none transition placeholder:text-slate-300 focus:border-violet-300 focus:ring-4 focus:ring-violet-100"
+                  />
+                </label>
+                <button
+                  onClick={onInvite}
+                  disabled={isPending}
+                  className="inline-flex items-center justify-center gap-2 rounded-xl bg-violet-600 px-3.5 py-2 text-[11.5px] font-semibold text-white shadow-sm transition hover:bg-violet-700 disabled:opacity-60"
+                >
+                  <Send size={13} />
+                  Invite
+                </button>
+              </div>
+            ) : (
+              <div className="rounded-xl border border-slate-100 bg-white px-3 py-3 text-[12px] leading-5 text-slate-500">
+                Only the board owner can invite more collaborators.
+              </div>
+            )}
+
+            {collaboration.error && (
+              <div className="mt-3 rounded-xl border border-rose-100 bg-rose-50 px-3 py-2 text-[12px] font-medium text-rose-600">
+                {collaboration.error}
+              </div>
+            )}
+          </div>
+        </div>
+      </aside>
+    </div>
+  );
+}
+
+function CollaboratorRow({
+  member,
+}: {
+  member: CollaborationSummaryRecord["members"][number];
+}) {
+  return (
+    <div className="flex items-center gap-3 rounded-2xl border border-slate-100 bg-white px-3 py-3 shadow-sm">
+      <span
+        className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-[11px] font-bold text-white shadow-sm"
+        style={{ backgroundColor: member.avatarColor }}
+      >
+        {member.initials}
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="block truncate text-[12.5px] font-bold text-slate-700">
+          {member.name || member.email}
+        </span>
+        <span className="mt-0.5 block truncate text-[11px] text-slate-400">{member.email}</span>
+      </span>
+      <span
+        className={cn(
+          "rounded-full px-2 py-1 text-[10px] font-bold uppercase tracking-[0.08em]",
+          member.role === "owner"
+            ? "bg-orange-50 text-orange-600"
+            : member.status === "pending"
+              ? "bg-slate-50 text-slate-400"
+              : "bg-emerald-50 text-emerald-600"
+        )}
+      >
+        {member.role === "owner" ? "Owner" : member.status}
+      </span>
+    </div>
+  );
 }
 
 function DialogShell({

@@ -84,6 +84,13 @@
   --text-heading: #1e1b4b;
   --text-muted: #94a3b8;
   --group-label: #cbd5e1;
+
+  --lb-accent: #6d28d9;
+  --lb-background: #ffffff;
+  --lb-foreground: #1e1b4b;
+  --lb-radius: 0.75rem;
+  --lb-dynamic-background: #ffffff;
+  --lb-dynamic-foreground: #1e1b4b;
 }
 
 /* Custom thin scrollbar for sidebar */

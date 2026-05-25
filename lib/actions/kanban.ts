@@ -1,10 +1,11 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { and, asc, desc, eq, inArray } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, or } from "drizzle-orm";
 import { db } from "@/db";
 import {
   calendarItems,
+  collaborationMembers,
   kanbanBoards,
   kanbanColumns,
   kanbanTasks,
@@ -13,6 +14,18 @@ import {
   type KanbanTask,
 } from "@/db/schema";
 import { syncUser } from "@/lib/actions/sync-user";
+import { KANBAN_RESOURCE_TYPE } from "@/lib/collaboration";
+import {
+  assertKanbanEditor,
+  ensureKanbanOwnerMembership,
+  inviteKanbanCollaboratorByEmail,
+  listKanbanBoardCollaborators,
+  toKanbanBoardRoomMetadata,
+} from "@/lib/kanban-collaboration";
+import {
+  broadcastKanbanBoardChanged,
+  broadcastKanbanMembersChanged,
+} from "@/lib/liveblocks-server";
 import {
   DEFAULT_KANBAN_COLUMNS,
   KANBAN_BOARD_COLORS,
@@ -162,32 +175,25 @@ function toColumnRecord(column: KanbanColumn, tasks: KanbanTask[]): KanbanColumn
 function toBoardRecord(
   board: KanbanBoard,
   columns: KanbanColumn[],
-  tasksByColumnId: Map<number, KanbanTask[]>
+  tasksByColumnId: Map<number, KanbanTask[]>,
+  role: "owner" | "editor"
 ): KanbanBoardRecord {
+  const roomMetadata = toKanbanBoardRoomMetadata(board, role);
+
   return {
     id: board.id,
     name: board.name,
     color: board.color,
     position: board.position,
+    role: roomMetadata.role,
+    roomId: roomMetadata.roomId,
     createdAt: board.createdAt.toISOString(),
     updatedAt: board.updatedAt.toISOString(),
     columns: columns.map((column) => toColumnRecord(column, tasksByColumnId.get(column.id) ?? [])),
   };
 }
 
-async function assertOwnedBoard(boardId: number, userId: number) {
-  const board = await db.query.kanbanBoards.findFirst({
-    where: and(eq(kanbanBoards.id, boardId), eq(kanbanBoards.userId, userId)),
-  });
-
-  if (!board) {
-    throw new Error("Kanban board not found.");
-  }
-
-  return board;
-}
-
-async function assertOwnedColumn(columnId: number, userId: number) {
+async function assertEditableColumn(columnId: number, userId: number) {
   const column = await db.query.kanbanColumns.findFirst({
     where: eq(kanbanColumns.id, columnId),
   });
@@ -196,11 +202,11 @@ async function assertOwnedColumn(columnId: number, userId: number) {
     throw new Error("Kanban column not found.");
   }
 
-  await assertOwnedBoard(column.boardId, userId);
-  return column;
+  const access = await assertKanbanEditor(column.boardId, userId);
+  return { column, board: access.board };
 }
 
-async function assertOwnedTask(taskId: number, userId: number) {
+async function assertEditableTask(taskId: number, userId: number) {
   const task = await db.query.kanbanTasks.findFirst({
     where: eq(kanbanTasks.id, taskId),
   });
@@ -209,8 +215,8 @@ async function assertOwnedTask(taskId: number, userId: number) {
     throw new Error("Kanban task not found.");
   }
 
-  await assertOwnedBoard(task.boardId, userId);
-  return task;
+  const access = await assertKanbanEditor(task.boardId, userId);
+  return { task, board: access.board };
 }
 
 async function getNextBoardPosition(userId: number) {
@@ -311,10 +317,31 @@ export async function fetchKanbanBoards() {
     return [];
   }
 
+  const memberships = await db
+    .select()
+    .from(collaborationMembers)
+    .where(
+      and(
+        eq(collaborationMembers.resourceType, KANBAN_RESOURCE_TYPE),
+        eq(collaborationMembers.userId, user.id)
+      )
+    );
+  const memberBoardIds = memberships.map((member) => member.resourceId);
+  const roleByBoardId = new Map(
+    memberships.map((member) => [
+      member.resourceId,
+      member.role === "owner" ? ("owner" as const) : ("editor" as const),
+    ])
+  );
+  const boardWhere =
+    memberBoardIds.length > 0
+      ? or(eq(kanbanBoards.userId, user.id), inArray(kanbanBoards.id, memberBoardIds))
+      : eq(kanbanBoards.userId, user.id);
+
   const boards = await db
     .select()
     .from(kanbanBoards)
-    .where(eq(kanbanBoards.userId, user.id))
+    .where(boardWhere)
     .orderBy(asc(kanbanBoards.position), asc(kanbanBoards.createdAt));
 
   const boardIds = boards.map((board) => board.id);
@@ -350,9 +377,11 @@ export async function fetchKanbanBoards() {
     tasksByColumnId.set(task.columnId, current);
   }
 
-  return boards.map((board) =>
-    toBoardRecord(board, columnsByBoardId.get(board.id) ?? [], tasksByColumnId)
-  );
+  return boards.map((board) => {
+    const role = board.userId === user.id ? "owner" : roleByBoardId.get(board.id) ?? "editor";
+
+    return toBoardRecord(board, columnsByBoardId.get(board.id) ?? [], tasksByColumnId, role);
+  });
 }
 
 export async function createKanbanBoard(input: KanbanBoardFormInput) {
@@ -380,13 +409,15 @@ export async function createKanbanBoard(input: KanbanBoardFormInput) {
     )
     .returning();
 
+  await ensureKanbanOwnerMembership(board, user!);
+
   revalidatePath("/kanban");
-  return toBoardRecord(board, columns, new Map());
+  return toBoardRecord(board, columns, new Map(), "owner");
 }
 
 export async function createKanbanColumn(input: KanbanColumnFormInput) {
   const user = await getAppUser();
-  await assertOwnedBoard(input.boardId, user!.id);
+  await assertKanbanEditor(input.boardId, user!.id);
 
   const currentColumns = await db
     .select({ id: kanbanColumns.id })
@@ -407,12 +438,13 @@ export async function createKanbanColumn(input: KanbanColumnFormInput) {
     .returning();
 
   revalidatePath("/kanban");
+  await broadcastKanbanBoardChanged(input.boardId, user!.id, "column:create");
   return toColumnRecord(column, []);
 }
 
 export async function updateKanbanColumn(columnId: number, name: string) {
   const user = await getAppUser();
-  const column = await assertOwnedColumn(columnId, user!.id);
+  const { column, board } = await assertEditableColumn(columnId, user!.id);
 
   const [updated] = await db
     .update(kanbanColumns)
@@ -424,12 +456,13 @@ export async function updateKanbanColumn(columnId: number, name: string) {
     .returning();
 
   revalidatePath("/kanban");
+  await broadcastKanbanBoardChanged(board.id, user!.id, "column:update");
   return toColumnRecord(updated, []);
 }
 
 export async function deleteKanbanColumn(columnId: number) {
   const user = await getAppUser();
-  const column = await assertOwnedColumn(columnId, user!.id);
+  const { column, board } = await assertEditableColumn(columnId, user!.id);
 
   const tasks = await db
     .select({ calendarItemId: kanbanTasks.calendarItemId })
@@ -443,22 +476,23 @@ export async function deleteKanbanColumn(columnId: number) {
   if (calendarIds.length > 0) {
     await db
       .delete(calendarItems)
-      .where(and(inArray(calendarItems.id, calendarIds), eq(calendarItems.userId, user!.id)));
+      .where(and(inArray(calendarItems.id, calendarIds), eq(calendarItems.userId, board.userId)));
   }
 
   await db.delete(kanbanColumns).where(eq(kanbanColumns.id, column.id));
 
   revalidatePath("/kanban");
   revalidatePath("/calendar");
+  await broadcastKanbanBoardChanged(board.id, user!.id, "column:delete");
   return { id: column.id };
 }
 
 export async function createKanbanTask(input: KanbanTaskFormInput) {
   const user = await getAppUser();
-  const column = await assertOwnedColumn(input.columnId, user!.id);
+  const { column, board } = await assertEditableColumn(input.columnId, user!.id);
   const values = normalizeTaskInput(input);
   const calendarItemId = values.syncToCalendar
-    ? await createCalendarItemForTask(user!.id, values)
+    ? await createCalendarItemForTask(board.userId, values)
     : null;
 
   const [task] = await db
@@ -480,14 +514,15 @@ export async function createKanbanTask(input: KanbanTaskFormInput) {
 
   revalidatePath("/kanban");
   if (values.syncToCalendar) revalidatePath("/calendar");
+  await broadcastKanbanBoardChanged(board.id, user!.id, "task:create");
 
   return toTaskRecord(task);
 }
 
 export async function updateKanbanTask(taskId: number, input: KanbanTaskFormInput) {
   const user = await getAppUser();
-  const task = await assertOwnedTask(taskId, user!.id);
-  const column = await assertOwnedColumn(input.columnId, user!.id);
+  const { task, board } = await assertEditableTask(taskId, user!.id);
+  const { column } = await assertEditableColumn(input.columnId, user!.id);
 
   if (column.boardId !== task.boardId) {
     throw new Error("Tasks can only move inside their board.");
@@ -495,11 +530,11 @@ export async function updateKanbanTask(taskId: number, input: KanbanTaskFormInpu
 
   const values = normalizeTaskInput(input);
   const calendarItemId = values.syncToCalendar
-    ? await upsertCalendarItemForTask(task.calendarItemId, user!.id, values)
+    ? await upsertCalendarItemForTask(task.calendarItemId, board.userId, values)
     : null;
 
   if (!values.syncToCalendar) {
-    await deleteCalendarItemForTask(task.calendarItemId, user!.id);
+    await deleteCalendarItemForTask(task.calendarItemId, board.userId);
   }
 
   const [updated] = await db
@@ -521,18 +556,20 @@ export async function updateKanbanTask(taskId: number, input: KanbanTaskFormInpu
 
   revalidatePath("/kanban");
   revalidatePath("/calendar");
+  await broadcastKanbanBoardChanged(board.id, user!.id, "task:update");
   return toTaskRecord(updated);
 }
 
 export async function deleteKanbanTask(taskId: number) {
   const user = await getAppUser();
-  const task = await assertOwnedTask(taskId, user!.id);
+  const { task, board } = await assertEditableTask(taskId, user!.id);
 
-  await deleteCalendarItemForTask(task.calendarItemId, user!.id);
+  await deleteCalendarItemForTask(task.calendarItemId, board.userId);
   await db.delete(kanbanTasks).where(eq(kanbanTasks.id, task.id));
 
   revalidatePath("/kanban");
   if (task.calendarItemId) revalidatePath("/calendar");
+  await broadcastKanbanBoardChanged(board.id, user!.id, "task:delete");
 
   return { id: task.id };
 }
@@ -543,8 +580,8 @@ export async function moveKanbanTask(
   columns: KanbanMoveColumnPayload[]
 ) {
   const user = await getAppUser();
-  const task = await assertOwnedTask(taskId, user!.id);
-  const targetColumn = await assertOwnedColumn(targetColumnId, user!.id);
+  const { task, board } = await assertEditableTask(taskId, user!.id);
+  const { column: targetColumn } = await assertEditableColumn(targetColumnId, user!.id);
 
   if (targetColumn.boardId !== task.boardId) {
     throw new Error("Tasks can only move inside their board.");
@@ -596,5 +633,22 @@ export async function moveKanbanTask(
   }
 
   revalidatePath("/kanban");
+  await broadcastKanbanBoardChanged(board.id, user!.id, "task:move");
   return { id: task.id, columnId: targetColumn.id };
+}
+
+export async function fetchKanbanBoardCollaboration(boardId: number) {
+  const user = await getAppUser();
+
+  return listKanbanBoardCollaborators(boardId, user!.id);
+}
+
+export async function inviteKanbanBoardCollaborator(boardId: number, email: string) {
+  const user = await getAppUser();
+  const collaboration = await inviteKanbanCollaboratorByEmail(boardId, user!, email);
+
+  revalidatePath("/kanban");
+  await broadcastKanbanMembersChanged(boardId, user!.id);
+
+  return collaboration;
 }

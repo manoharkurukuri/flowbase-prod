@@ -1,4 +1,13 @@
-import { boolean, integer, pgTable, serial, text, timestamp } from "drizzle-orm/pg-core";
+import {
+  boolean,
+  index,
+  integer,
+  pgTable,
+  serial,
+  text,
+  timestamp,
+  uniqueIndex,
+} from "drizzle-orm/pg-core";
 
 export const users = pgTable("users", {
   id: serial("id").primaryKey(),
@@ -69,6 +78,34 @@ export const kanbanTasks = pgTable("kanban_tasks", {
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
 
+export const collaborationMembers = pgTable(
+  "collaboration_members",
+  {
+    id: serial("id").primaryKey(),
+    resourceType: text("resource_type").notNull(),
+    resourceId: integer("resource_id").notNull(),
+    userId: integer("user_id").references(() => users.id, { onDelete: "set null" }),
+    email: text("email").notNull(),
+    role: text("role").notNull().default("editor"),
+    invitedByUserId: integer("invited_by_user_id").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    acceptedAt: timestamp("accepted_at"),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at").defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex("collaboration_members_resource_email_unique").on(
+      table.resourceType,
+      table.resourceId,
+      table.email
+    ),
+    index("collaboration_members_resource_idx").on(table.resourceType, table.resourceId),
+    index("collaboration_members_user_id_idx").on(table.userId),
+    index("collaboration_members_email_idx").on(table.email),
+  ]
+);
+
 
 export type User = typeof users.$inferSelect;
 export type NewUser = typeof users.$inferInsert;
@@ -80,3 +117,5 @@ export type KanbanColumn = typeof kanbanColumns.$inferSelect;
 export type NewKanbanColumn = typeof kanbanColumns.$inferInsert;
 export type KanbanTask = typeof kanbanTasks.$inferSelect;
 export type NewKanbanTask = typeof kanbanTasks.$inferInsert;
+export type CollaborationMember = typeof collaborationMembers.$inferSelect;
+export type NewCollaborationMember = typeof collaborationMembers.$inferInsert;
