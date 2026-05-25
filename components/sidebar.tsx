@@ -1,5 +1,6 @@
 "use client";
 
+import { useClerk, useUser } from "@clerk/nextjs";
 import { useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
@@ -74,7 +75,14 @@ const navGroups = [
 
 export function Sidebar() {
   const [collapsed, setCollapsed] = useState(false);
+  const { signOut } = useClerk();
+  const { user } = useUser();
   const pathname = usePathname();
+  const displayName =
+    user?.fullName || user?.primaryEmailAddress?.emailAddress || "Account";
+  const handleSignOut = () => {
+    void signOut({ redirectUrl: "/sign-in" });
+  };
 
   return (
     <aside
@@ -197,36 +205,41 @@ export function Sidebar() {
         </Link>
 
         {/* User card */}
-        <div
-          className={cn(
-            "flex items-center gap-2 rounded-xl py-2 bg-gradient-to-br from-violet-50 to-indigo-50 border border-violet-100",
-            collapsed ? "justify-center px-0" : "px-2.5"
-          )}
-        >
-          {/* Avatar */}
-          <div className="w-6 h-6 rounded-full bg-gradient-to-br from-violet-400 to-pink-400 flex items-center justify-center shrink-0 shadow-sm">
-            <User size={11} className="text-white" />
-          </div>
+        {collapsed ? (
+          <button
+            type="button"
+            onClick={handleSignOut}
+            title="Sign out"
+            aria-label="Sign out"
+            className="flex items-center justify-center w-10 h-10 mx-auto rounded-xl bg-gradient-to-br from-violet-50 to-indigo-50 border border-violet-100 text-slate-300 hover:text-rose-400 hover:border-rose-100 transition-colors"
+          >
+            <LogOut size={14} />
+          </button>
+        ) : (
+          <div className="flex items-center gap-2 rounded-xl py-2 px-2.5 bg-gradient-to-br from-violet-50 to-indigo-50 border border-violet-100">
+            <div className="w-6 h-6 rounded-full bg-gradient-to-br from-violet-400 to-pink-400 flex items-center justify-center shrink-0 shadow-sm">
+              <User size={11} className="text-white" />
+            </div>
 
-          {!collapsed && (
-            <>
-              <div className="flex-1 min-w-0">
-                <p className="text-[11px] font-semibold text-slate-700 truncate leading-tight">
-                  John Doe
-                </p>
-                <p className="text-[9.5px] font-medium text-violet-500 truncate leading-tight">
-                  Pro Plan
-                </p>
-              </div>
-              <button
-                title="Sign out"
-                className="text-slate-300 hover:text-rose-400 transition-colors shrink-0 ml-1"
-              >
-                <LogOut size={12} />
-              </button>
-            </>
-          )}
-        </div>
+            <div className="flex-1 min-w-0">
+              <p className="text-[11px] font-semibold text-slate-700 truncate leading-tight">
+                {displayName}
+              </p>
+              <p className="text-[9.5px] font-medium text-violet-500 truncate leading-tight">
+                Pro Plan
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={handleSignOut}
+              title="Sign out"
+              aria-label="Sign out"
+              className="p-1 -mr-1 rounded-md text-slate-300 hover:bg-white/70 hover:text-rose-400 transition-colors shrink-0"
+            >
+              <LogOut size={12} />
+            </button>
+          </div>
+        )}
       </div>
     </aside>
   );
