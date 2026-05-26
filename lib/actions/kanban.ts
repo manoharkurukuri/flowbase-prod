@@ -14,6 +14,8 @@ import {
   type KanbanTask,
 } from "@/db/schema";
 import { syncUser } from "@/lib/actions/sync-user";
+import { getCategoryOptionsForUser } from "@/lib/settings-data";
+import { getDefaultCategoryKey, type CategoryOption } from "@/lib/settings";
 import { KANBAN_RESOURCE_TYPE } from "@/lib/collaboration";
 import {
   assertKanbanEditor,
@@ -29,21 +31,17 @@ import {
 import {
   DEFAULT_KANBAN_COLUMNS,
   KANBAN_BOARD_COLORS,
-  KANBAN_LABELS,
   KANBAN_PRIORITIES,
   MAX_KANBAN_COLUMNS,
   type KanbanBoardFormInput,
   type KanbanBoardRecord,
   type KanbanColumnFormInput,
   type KanbanColumnRecord,
-  type KanbanLabelId,
   type KanbanMoveColumnPayload,
   type KanbanPriority,
   type KanbanTaskFormInput,
   type KanbanTaskRecord,
 } from "@/lib/kanban";
-
-const labelValues = KANBAN_LABELS.map((label) => label.id);
 
 async function getAppUser(required = true) {
   const user = await syncUser();
@@ -103,39 +101,47 @@ function normalizeDate(value: string | null | undefined) {
   return date;
 }
 
-function normalizeLabelIds(labels: string[] | null | undefined): KanbanLabelId[] {
-  const seen = new Set<KanbanLabelId>();
+function normalizeLabelIds(
+  labels: string[] | null | undefined,
+  categoryOptions: CategoryOption[]
+): string[] {
+  const seen = new Set<string>();
+  const labelValues = categoryOptions.map((label) => label.key);
 
   for (const label of labels ?? []) {
-    if (labelValues.includes(label as KanbanLabelId)) {
-      seen.add(label as KanbanLabelId);
+    if (labelValues.includes(label)) {
+      seen.add(label);
     }
   }
 
   return Array.from(seen).slice(0, 4);
 }
 
-function parseLabelIds(value: string): KanbanLabelId[] {
+function parseLabelIds(value: string): string[] {
   try {
     const parsed = JSON.parse(value);
 
     if (Array.isArray(parsed)) {
-      return normalizeLabelIds(parsed);
+      return parsed.filter((label): label is string => typeof label === "string").slice(0, 4);
     }
   } catch {
-    return normalizeLabelIds(value.split(","));
+    return value
+      .split(",")
+      .map((label) => label.trim())
+      .filter(Boolean)
+      .slice(0, 4);
   }
 
   return [];
 }
 
-function normalizeTaskInput(input: KanbanTaskFormInput) {
+function normalizeTaskInput(input: KanbanTaskFormInput, categoryOptions: CategoryOption[]) {
   return {
     title: requireText(input.title, 120, "Tasks need a title."),
     description: cleanText(input.description, 700),
     dueDate: normalizeDate(input.dueDate),
     priority: normalizePriority(input.priority),
-    labelIds: normalizeLabelIds(input.labelIds),
+    labelIds: normalizeLabelIds(input.labelIds, categoryOptions),
     syncToCalendar: Boolean(input.syncToCalendar),
     linkedToNotes: Boolean(input.linkedToNotes),
   };
@@ -176,7 +182,8 @@ function toBoardRecord(
   board: KanbanBoard,
   columns: KanbanColumn[],
   tasksByColumnId: Map<number, KanbanTask[]>,
-  role: "owner" | "editor"
+  role: "owner" | "editor",
+  labels: CategoryOption[]
 ): KanbanBoardRecord {
   const roomMetadata = toKanbanBoardRoomMetadata(board, role);
 
@@ -187,6 +194,7 @@ function toBoardRecord(
     position: board.position,
     role: roomMetadata.role,
     roomId: roomMetadata.roomId,
+    labels,
     createdAt: board.createdAt.toISOString(),
     updatedAt: board.updatedAt.toISOString(),
     columns: columns.map((column) => toColumnRecord(column, tasksByColumnId.get(column.id) ?? [])),
@@ -263,7 +271,7 @@ async function createCalendarItemForTask(
       title: values.title,
       description: values.description?.slice(0, 400) ?? null,
       itemType: "task",
-      category: "Work",
+      category: getDefaultCategoryKey("calendar"),
       scheduledDate: values.dueDate,
       scheduledTime: null,
     })
@@ -287,7 +295,7 @@ async function upsertCalendarItemForTask(
       title: values.title,
       description: values.description?.slice(0, 400) ?? null,
       itemType: "task",
-      category: "Work",
+      category: getDefaultCategoryKey("calendar"),
       scheduledDate: values.dueDate,
       scheduledTime: null,
       updatedAt: new Date(),
@@ -377,10 +385,23 @@ export async function fetchKanbanBoards() {
     tasksByColumnId.set(task.columnId, current);
   }
 
+  const ownerIds = Array.from(new Set(boards.map((board) => board.userId)));
+  const labelsByOwnerId = new Map<number, CategoryOption[]>(
+    await Promise.all(
+      ownerIds.map(async (ownerId) => [ownerId, await getCategoryOptionsForUser(ownerId, "kanban")] as const)
+    )
+  );
+
   return boards.map((board) => {
     const role = board.userId === user.id ? "owner" : roleByBoardId.get(board.id) ?? "editor";
 
-    return toBoardRecord(board, columnsByBoardId.get(board.id) ?? [], tasksByColumnId, role);
+    return toBoardRecord(
+      board,
+      columnsByBoardId.get(board.id) ?? [],
+      tasksByColumnId,
+      role,
+      labelsByOwnerId.get(board.userId) ?? []
+    );
   });
 }
 
@@ -412,7 +433,13 @@ export async function createKanbanBoard(input: KanbanBoardFormInput) {
   await ensureKanbanOwnerMembership(board, user!);
 
   revalidatePath("/kanban");
-  return toBoardRecord(board, columns, new Map(), "owner");
+  return toBoardRecord(
+    board,
+    columns,
+    new Map(),
+    "owner",
+    await getCategoryOptionsForUser(user!.id, "kanban")
+  );
 }
 
 export async function createKanbanColumn(input: KanbanColumnFormInput) {
@@ -490,7 +517,7 @@ export async function deleteKanbanColumn(columnId: number) {
 export async function createKanbanTask(input: KanbanTaskFormInput) {
   const user = await getAppUser();
   const { column, board } = await assertEditableColumn(input.columnId, user!.id);
-  const values = normalizeTaskInput(input);
+  const values = normalizeTaskInput(input, await getCategoryOptionsForUser(board.userId, "kanban"));
   const calendarItemId = values.syncToCalendar
     ? await createCalendarItemForTask(board.userId, values)
     : null;
@@ -528,7 +555,7 @@ export async function updateKanbanTask(taskId: number, input: KanbanTaskFormInpu
     throw new Error("Tasks can only move inside their board.");
   }
 
-  const values = normalizeTaskInput(input);
+  const values = normalizeTaskInput(input, await getCategoryOptionsForUser(board.userId, "kanban"));
   const calendarItemId = values.syncToCalendar
     ? await upsertCalendarItemForTask(task.calendarItemId, board.userId, values)
     : null;

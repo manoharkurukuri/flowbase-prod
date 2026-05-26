@@ -2,6 +2,7 @@ import { ClerkProvider } from '@clerk/nextjs';
 import { syncUser } from "@/lib/actions/sync-user";
 import { Plus_Jakarta_Sans } from "next/font/google";
 import "@liveblocks/react-ui/styles.css";
+import "@excalidraw/excalidraw/index.css";
 import "./globals.css";
 import type { Metadata } from "next";
 

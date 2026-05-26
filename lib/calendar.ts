@@ -1,54 +1,23 @@
+import { DEFAULT_CATEGORIES, getColorMeta, type CategoryOption } from "@/lib/settings";
+
 export const CALENDAR_ITEM_TYPES = ["task", "reminder"] as const;
 
-export const CALENDAR_CATEGORY_OPTIONS = [
-  {
-    value: "Work",
-    label: "Work",
-    color: "#3B82F6",
-    bg: "#EFF6FF",
-    border: "#BFDBFE",
-  },
-  {
-    value: "Personal",
-    label: "Personal",
-    color: "#EC4899",
-    bg: "#FDF2F8",
-    border: "#FBCFE8",
-  },
-  {
-    value: "Meeting",
-    label: "Meeting",
-    color: "#8B5CF6",
-    bg: "#F5F3FF",
-    border: "#DDD6FE",
-  },
-  {
-    value: "Deadline",
-    label: "Deadline",
-    color: "#F97316",
-    bg: "#FFF7ED",
-    border: "#FED7AA",
-  },
-  {
-    value: "Reminder",
-    label: "Reminder",
-    color: "#06B6D4",
-    bg: "#ECFEFF",
-    border: "#A5F3FC",
-  },
-  {
-    value: "Focus",
-    label: "Focus",
-    color: "#10B981",
-    bg: "#ECFDF5",
-    border: "#A7F3D0",
-  },
-] as const;
+export const CALENDAR_CATEGORY_OPTIONS = DEFAULT_CATEGORIES.calendar.map((category) => {
+  const color = getColorMeta(category.color);
+
+  return {
+    value: category.key,
+    label: category.name,
+    color: category.color,
+    bg: color.bg,
+    border: color.border,
+  };
+});
 
 export const DEFAULT_CALENDAR_CATEGORY = "Work";
 
 export type CalendarItemType = (typeof CALENDAR_ITEM_TYPES)[number];
-export type CalendarCategory = (typeof CALENDAR_CATEGORY_OPTIONS)[number]["value"];
+export type CalendarCategory = string;
 
 export type CalendarItemRecord = {
   id: number;
@@ -71,7 +40,14 @@ export type CalendarItemFormInput = {
   scheduledTime?: string | null;
 };
 
-export function getCalendarCategoryMeta(category: string) {
+export function getCalendarCategoryMeta(category: string, options?: CategoryOption[]) {
+  if (options?.length) {
+    return (
+      options.find((option) => option.key === category) ??
+      options[0]
+    );
+  }
+
   return (
     CALENDAR_CATEGORY_OPTIONS.find((option) => option.value === category) ??
     CALENDAR_CATEGORY_OPTIONS[0]

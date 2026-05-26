@@ -28,17 +28,19 @@ import {
   updateCalendarItem,
 } from "@/lib/actions/calendar-items";
 import {
-  CALENDAR_CATEGORY_OPTIONS,
-  DEFAULT_CALENDAR_CATEGORY,
   getCalendarCategoryMeta,
   type CalendarCategory,
   type CalendarItemRecord,
   type CalendarItemType,
 } from "@/lib/calendar";
+import { getDefaultCategoryKey, type CategoryOption } from "@/lib/settings";
 import { cn } from "@/lib/utils";
 
 type CalendarPageClientProps = {
   initialItems: CalendarItemRecord[];
+  initialView: CalendarView;
+  calendarCategories: CategoryOption[];
+  reminderCategories: CategoryOption[];
 };
 
 type CalendarView = "month" | "week";
@@ -115,12 +117,16 @@ function formatWeekTitle(days: Date[]) {
   return `${monthFormatter.format(first)} ${first.getDate()} - ${monthFormatter.format(last)} ${last.getDate()}, ${last.getFullYear()}`;
 }
 
-function getEmptyForm(dateKey: string, asDraft = false): CalendarFormState {
+function getEmptyForm(
+  dateKey: string,
+  asDraft = false,
+  category = getDefaultCategoryKey("calendar")
+): CalendarFormState {
   return {
     title: "",
     description: "",
     itemType: "task",
-    category: DEFAULT_CALENDAR_CATEGORY,
+    category,
     scheduledDate: asDraft ? "" : dateKey,
     scheduledTime: "",
   };
@@ -148,15 +154,22 @@ function formatTime(time: string | null) {
   }).format(date);
 }
 
-export function CalendarPageClient({ initialItems }: CalendarPageClientProps) {
+export function CalendarPageClient({
+  initialItems,
+  initialView,
+  calendarCategories,
+  reminderCategories,
+}: CalendarPageClientProps) {
   const todayKey = toDateKey(new Date());
   const [items, setItems] = useState(initialItems);
-  const [view, setView] = useState<CalendarView>("month");
+  const [view, setView] = useState<CalendarView>(initialView);
   const [cursorDate, setCursorDate] = useState(() => new Date());
   const [selectedDate, setSelectedDate] = useState(todayKey);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingItem, setEditingItem] = useState<CalendarItemRecord | null>(null);
-  const [form, setForm] = useState<CalendarFormState>(() => getEmptyForm(todayKey));
+  const [form, setForm] = useState<CalendarFormState>(() =>
+    getEmptyForm(todayKey, false, calendarCategories[0]?.key ?? getDefaultCategoryKey("calendar"))
+  );
   const [dragOverDate, setDragOverDate] = useState<string | null>(null);
   const [placingDraftId, setPlacingDraftId] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -188,6 +201,9 @@ export function CalendarPageClient({ initialItems }: CalendarPageClientProps) {
   const selectedDraft = placingDraftId
     ? draftItems.find((item) => item.id === placingDraftId)
     : null;
+  const getCategoryOptionsForType = (itemType: CalendarItemType) =>
+    itemType === "reminder" ? reminderCategories : calendarCategories;
+  const activeCategoryOptions = getCategoryOptionsForType(form.itemType);
 
   function replaceItem(updated: CalendarItemRecord) {
     setItems((current) => current.map((item) => (item.id === updated.id ? updated : item)));
@@ -195,7 +211,9 @@ export function CalendarPageClient({ initialItems }: CalendarPageClientProps) {
 
   function openCreateDialog(dateKey = selectedDate, asDraft = false) {
     setEditingItem(null);
-    setForm(getEmptyForm(dateKey, asDraft));
+    setForm(
+      getEmptyForm(dateKey, asDraft, calendarCategories[0]?.key ?? getDefaultCategoryKey("calendar"))
+    );
     setError(null);
     setDialogOpen(true);
   }
@@ -530,6 +548,7 @@ export function CalendarPageClient({ initialItems }: CalendarPageClientProps) {
                         <CalendarItemChip
                           key={item.id}
                           item={item}
+                          categories={getCategoryOptionsForType(item.itemType)}
                           onDragStart={handleDragStart}
                           onClick={(event) => {
                             event.stopPropagation();
@@ -581,6 +600,7 @@ export function CalendarPageClient({ initialItems }: CalendarPageClientProps) {
                   <DraftItemCard
                     key={item.id}
                     item={item}
+                    categories={getCategoryOptionsForType(item.itemType)}
                     isPlacing={placingDraftId === item.id}
                     onDragStart={handleDragStart}
                     onEdit={() => openEditDialog(item)}
@@ -636,9 +656,16 @@ export function CalendarPageClient({ initialItems }: CalendarPageClientProps) {
                   </span>
                   <select
                     value={form.itemType}
-                    onChange={(event) =>
-                      setForm({ ...form, itemType: event.target.value as CalendarItemType })
-                    }
+                    onChange={(event) => {
+                      const nextType = event.target.value as CalendarItemType;
+                      const nextOptions = getCategoryOptionsForType(nextType);
+
+                      setForm({
+                        ...form,
+                        itemType: nextType,
+                        category: nextOptions[0]?.key ?? getDefaultCategoryKey("calendar"),
+                      });
+                    }}
                     className="h-10 w-full rounded-xl border border-slate-200 bg-white px-3 text-[13px] font-medium text-slate-700 outline-none transition focus:border-violet-300 focus:ring-4 focus:ring-violet-100"
                   >
                     <option value="task">Task</option>
@@ -657,8 +684,8 @@ export function CalendarPageClient({ initialItems }: CalendarPageClientProps) {
                     }
                     className="h-10 w-full rounded-xl border border-slate-200 bg-white px-3 text-[13px] font-medium text-slate-700 outline-none transition focus:border-violet-300 focus:ring-4 focus:ring-violet-100"
                   >
-                    {CALENDAR_CATEGORY_OPTIONS.map((option) => (
-                      <option key={option.value} value={option.value}>
+                    {activeCategoryOptions.map((option) => (
+                      <option key={option.key} value={option.key}>
                         {option.label}
                       </option>
                     ))}
@@ -667,21 +694,21 @@ export function CalendarPageClient({ initialItems }: CalendarPageClientProps) {
               </div>
 
               <div className="flex flex-wrap gap-2">
-                {CALENDAR_CATEGORY_OPTIONS.map((option) => (
+                {activeCategoryOptions.map((option) => (
                   <button
-                    key={option.value}
-                    onClick={() => setForm({ ...form, category: option.value })}
+                    key={option.key}
+                    onClick={() => setForm({ ...form, category: option.key })}
                     className={cn(
                       "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-semibold transition",
-                      form.category === option.value && "shadow-sm"
+                      form.category === option.key && "shadow-sm"
                     )}
                     style={{
                       borderColor: option.border,
-                      backgroundColor: form.category === option.value ? option.bg : "#ffffff",
+                      backgroundColor: form.category === option.key ? option.bg : "#ffffff",
                       color: option.color,
                     }}
                   >
-                    {form.category === option.value && <Check size={11} />}
+                    {form.category === option.key && <Check size={11} />}
                     {option.label}
                   </button>
                 ))}
@@ -776,14 +803,16 @@ export function CalendarPageClient({ initialItems }: CalendarPageClientProps) {
 
 function CalendarItemChip({
   item,
+  categories,
   onDragStart,
   onClick,
 }: {
   item: CalendarItemRecord;
+  categories: CategoryOption[];
   onDragStart: (event: React.DragEvent, item: CalendarItemRecord) => void;
   onClick: (event: React.MouseEvent) => void;
 }) {
-  const category = getCalendarCategoryMeta(item.category);
+  const category = getCalendarCategoryMeta(item.category, categories);
   const time = formatTime(item.scheduledTime);
 
   return (
@@ -812,18 +841,20 @@ function CalendarItemChip({
 
 function DraftItemCard({
   item,
+  categories,
   isPlacing,
   onDragStart,
   onEdit,
   onPlace,
 }: {
   item: CalendarItemRecord;
+  categories: CategoryOption[];
   isPlacing: boolean;
   onDragStart: (event: React.DragEvent, item: CalendarItemRecord) => void;
   onEdit: () => void;
   onPlace: () => void;
 }) {
-  const category = getCalendarCategoryMeta(item.category);
+  const category = getCalendarCategoryMeta(item.category, categories);
 
   return (
     <div

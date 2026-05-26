@@ -1,7 +1,7 @@
 "use client";
 
 import { useClerk, useUser } from "@clerk/nextjs";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
@@ -20,7 +20,12 @@ import {
   LogOut,
   User,
   HelpCircle,
+  Loader2,
+  X,
 } from "lucide-react";
+import { GeneratedTemplateIcon } from "@/components/generated-template-icon";
+import { removeAppFromSidebar } from "@/lib/actions/templates";
+import { type GeneratedAppRecord } from "@/lib/templates";
 import { cn } from "@/lib/utils";
 
 /* ------------------------------------------------------------------ */
@@ -43,7 +48,7 @@ const navGroups = [
     label: "Workspace",
     items: [
       { label: "Notes",          href: "/notes",      icon: FileText,      color: "#EAB308" },
-      { label: "Pages / Spaces", href: "/pages",      icon: BookOpen,      color: "#10B981" },
+      { label: "Pages & Spaces", href: "/pages",      icon: BookOpen,      color: "#10B981" },
       { label: "Whiteboard",     href: "/whiteboard", icon: PenLine,       color: "#EC4899" },
     ],
   },
@@ -73,8 +78,18 @@ const navGroups = [
 /*  Sidebar component                                                   */
 /* ------------------------------------------------------------------ */
 
-export function Sidebar() {
+type SidebarProps = {
+  initialGeneratedApps?: GeneratedAppRecord[];
+  initialSubscriptionPlan?: string;
+};
+
+export function Sidebar({
+  initialGeneratedApps = [],
+  initialSubscriptionPlan = "Free Plan",
+}: SidebarProps) {
   const [collapsed, setCollapsed] = useState(false);
+  const [generatedApps, setGeneratedApps] = useState(initialGeneratedApps);
+  const [removingAppId, setRemovingAppId] = useState<number | null>(null);
   const { signOut } = useClerk();
   const { user } = useUser();
   const pathname = usePathname();
@@ -83,6 +98,21 @@ export function Sidebar() {
   const handleSignOut = () => {
     void signOut({ redirectUrl: "/sign-in" });
   };
+
+  useEffect(() => {
+    setGeneratedApps(initialGeneratedApps);
+  }, [initialGeneratedApps]);
+
+  async function handleRemoveGeneratedApp(id: number) {
+    setRemovingAppId(id);
+
+    try {
+      await removeAppFromSidebar(id);
+      setGeneratedApps((current) => current.filter((app) => app.id !== id));
+    } finally {
+      setRemovingAppId(null);
+    }
+  }
 
   return (
     <aside
@@ -187,6 +217,89 @@ export function Sidebar() {
             </ul>
           </div>
         ))}
+
+        {generatedApps.length > 0 && (
+          <div>
+            {!collapsed ? (
+              <p className="px-2 mb-1 text-[9.5px] font-semibold uppercase tracking-[0.12em] text-slate-300">
+                Generated
+              </p>
+            ) : (
+              <div className="mx-auto w-6 border-t border-slate-100 my-1.5" />
+            )}
+
+            <ul className="space-y-[2px]">
+              {generatedApps.map((app) => {
+                const href = `/templates/${app.id}`;
+                const isActive = pathname === href;
+
+                return (
+                  <li key={app.id}>
+                    {collapsed ? (
+                      <Link
+                        href={href}
+                        title={app.appName}
+                        className={cn(
+                          "flex items-center justify-center w-10 mx-auto rounded-lg py-1.5 text-[11.5px] font-medium transition-all duration-150",
+                          isActive
+                            ? "bg-violet-50 text-violet-700"
+                            : "text-slate-500 hover:bg-slate-50 hover:text-slate-700"
+                        )}
+                      >
+                        <GeneratedTemplateIcon
+                          name={app.icon}
+                          size={15}
+                          style={{ color: isActive ? app.color : app.color + "88" }}
+                        />
+                      </Link>
+                    ) : (
+                      <div
+                        className={cn(
+                          "group/generated flex items-center gap-1 rounded-lg transition-all duration-150",
+                          isActive
+                            ? "bg-violet-50 text-violet-700"
+                            : "text-slate-500 hover:bg-slate-50 hover:text-slate-700"
+                        )}
+                      >
+                        <Link
+                          href={href}
+                          className="flex min-w-0 flex-1 items-center gap-2.5 rounded-lg py-1.5 pl-2.5 text-[11.5px] font-medium"
+                        >
+                          <GeneratedTemplateIcon
+                            name={app.icon}
+                            size={15}
+                            className="shrink-0"
+                            style={{ color: isActive ? app.color : app.color + "88" }}
+                          />
+                          <span className="truncate flex-1">{app.appName}</span>
+                          {isActive && (
+                            <span
+                              className="h-1.5 w-1.5 shrink-0 rounded-full"
+                              style={{ backgroundColor: app.color }}
+                            />
+                          )}
+                        </Link>
+                        <button
+                          type="button"
+                          onClick={() => handleRemoveGeneratedApp(app.id)}
+                          disabled={removingAppId === app.id}
+                          aria-label={`Remove ${app.appName} from sidebar`}
+                          className="mr-1 flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-slate-300 opacity-0 transition hover:bg-white hover:text-rose-400 disabled:opacity-60 group-hover/generated:opacity-100 focus:opacity-100"
+                        >
+                          {removingAppId === app.id ? (
+                            <Loader2 size={11} className="animate-spin" />
+                          ) : (
+                            <X size={12} />
+                          )}
+                        </button>
+                      </div>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+        )}
       </nav>
 
       {/* ── Footer ─────────────────────────────────────────────────── */}
@@ -226,7 +339,7 @@ export function Sidebar() {
                 {displayName}
               </p>
               <p className="text-[9.5px] font-medium text-violet-500 truncate leading-tight">
-                Pro Plan
+                {initialSubscriptionPlan}
               </p>
             </div>
             <button

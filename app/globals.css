@@ -108,6 +108,130 @@
   background: #c4b5fd;
 }
 
+.notes-editor .ProseMirror {
+  min-height: 520px;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.notes-editor .ProseMirror > * + * {
+  margin-top: 0.65rem;
+}
+
+.notes-editor .ProseMirror p {
+  min-height: 1.8rem;
+}
+
+.notes-editor .ProseMirror h1,
+.notes-editor .ProseMirror h2,
+.notes-editor .ProseMirror h3 {
+  color: #1e1b4b;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.notes-editor .ProseMirror h1 {
+  font-size: 2rem;
+  margin-top: 1.6rem;
+}
+
+.notes-editor .ProseMirror h2 {
+  font-size: 1.55rem;
+  margin-top: 1.35rem;
+}
+
+.notes-editor .ProseMirror h3 {
+  font-size: 1.15rem;
+  margin-top: 1.1rem;
+}
+
+.notes-editor .ProseMirror ul,
+.notes-editor .ProseMirror ol {
+  padding-left: 1.35rem;
+}
+
+.notes-editor .ProseMirror ul {
+  list-style: disc;
+}
+
+.notes-editor .ProseMirror ol {
+  list-style: decimal;
+}
+
+.notes-editor .ProseMirror li {
+  padding-left: 0.2rem;
+}
+
+.notes-editor .ProseMirror blockquote {
+  border-left: 3px solid #ddd6fe;
+  color: #64748b;
+  padding-left: 1rem;
+}
+
+.notes-editor .ProseMirror code {
+  background: #f5f3ff;
+  border-radius: 0.45rem;
+  color: #6d28d9;
+  font-size: 0.9em;
+  padding: 0.12rem 0.35rem;
+}
+
+.notes-editor .ProseMirror pre {
+  background: #1e1b4b;
+  border-radius: 1rem;
+  color: #f8fafc;
+  overflow-x: auto;
+  padding: 1rem;
+}
+
+.notes-editor .ProseMirror pre code {
+  background: transparent;
+  color: inherit;
+  padding: 0;
+}
+
+.notes-editor .ProseMirror hr {
+  border: none;
+  border-top: 1px solid #e2e8f0;
+  margin: 1.5rem 0;
+}
+
+.notes-editor .ProseMirror ul[data-type="taskList"] {
+  list-style: none;
+  padding-left: 0;
+}
+
+.notes-editor .ProseMirror li[data-type="taskItem"] {
+  display: flex;
+  gap: 0.65rem;
+}
+
+.notes-editor .ProseMirror li[data-type="taskItem"] > label {
+  flex: 0 0 auto;
+  margin-top: 0.25rem;
+}
+
+.notes-editor .ProseMirror li[data-type="taskItem"] > div {
+  min-width: 0;
+  flex: 1;
+}
+
+.notes-editor .ProseMirror .is-editor-empty:first-child::before,
+.notes-editor .ProseMirror .is-empty::before {
+  color: #cbd5e1;
+  content: attr(data-placeholder);
+  float: left;
+  height: 0;
+  pointer-events: none;
+}
+
+.line-clamp-1 {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 1;
+  overflow: hidden;
+}
+
 
 
 @layer base {

@@ -60,7 +60,6 @@ import {
 } from "@/lib/collaboration";
 import {
   KANBAN_BOARD_COLORS,
-  KANBAN_LABELS,
   KANBAN_PRIORITIES,
   MAX_KANBAN_COLUMNS,
   getKanbanLabelMeta,
@@ -71,6 +70,7 @@ import {
   type KanbanTaskFormInput,
   type KanbanTaskRecord,
 } from "@/lib/kanban";
+import { type CategoryOption } from "@/lib/settings";
 import { cn } from "@/lib/utils";
 import { resolveLiveblocksUsers } from "@/liveblocks.config";
 
@@ -122,6 +122,7 @@ type DropTarget = {
 
 type KanbanPageClientProps = {
   initialBoards: KanbanBoardRecord[];
+  defaultTaskPriority: KanbanPriority;
 };
 
 type CollaborationPanelState = CollaborationSummaryRecord & {
@@ -145,13 +146,13 @@ function formatDueDate(dateKey: string) {
   }).format(new Date(year, month - 1, day));
 }
 
-function getEmptyTaskForm(columnId: number): TaskFormState {
+function getEmptyTaskForm(columnId: number, defaultTaskPriority: KanbanPriority): TaskFormState {
   return {
     columnId,
     title: "",
     description: "",
     dueDate: toDateKey(new Date()),
-    priority: "Medium",
+    priority: defaultTaskPriority,
     labelIds: [],
     syncToCalendar: false,
     linkedToNotes: false,
@@ -264,7 +265,10 @@ function moveTaskOnBoard(
   return { ...board, columns };
 }
 
-export function KanbanPageClient({ initialBoards }: KanbanPageClientProps) {
+export function KanbanPageClient({
+  initialBoards,
+  defaultTaskPriority,
+}: KanbanPageClientProps) {
   const [boards, setBoards] = useState(initialBoards);
   const [selectedBoardId, setSelectedBoardId] = useState<number | null>(
     initialBoards[0]?.id ?? null
@@ -278,7 +282,9 @@ export function KanbanPageClient({ initialBoards }: KanbanPageClientProps) {
   const [columnToDelete, setColumnToDelete] = useState<KanbanColumnRecord | null>(null);
   const [taskDialog, setTaskDialog] = useState<TaskDialogState | null>(null);
   const [taskDialogTab, setTaskDialogTab] = useState<TaskDialogTab>("details");
-  const [taskForm, setTaskForm] = useState<TaskFormState>(() => getEmptyTaskForm(0));
+  const [taskForm, setTaskForm] = useState<TaskFormState>(() =>
+    getEmptyTaskForm(0, defaultTaskPriority)
+  );
   const [collaborationPanel, setCollaborationPanel] =
     useState<CollaborationPanelState | null>(null);
   const [draggingTaskId, setDraggingTaskId] = useState<number | null>(null);
@@ -418,7 +424,7 @@ export function KanbanPageClient({ initialBoards }: KanbanPageClientProps) {
   }
 
   function openCreateTaskDialog(columnId: number) {
-    setTaskForm(getEmptyTaskForm(columnId));
+    setTaskForm(getEmptyTaskForm(columnId, defaultTaskPriority));
     setTaskDialog({ mode: "create", columnId });
     setTaskDialogTab("details");
     setError(null);
@@ -816,6 +822,7 @@ export function KanbanPageClient({ initialBoards }: KanbanPageClientProps) {
                   {taskDialog && (
                     <TaskDialogModal
                       boardId={selectedBoard.id}
+                      labels={selectedBoard.labels}
                       taskDialog={taskDialog}
                       taskDialogTab={taskDialogTab}
                       taskForm={taskForm}
@@ -1145,6 +1152,7 @@ function KanbanBoardRoomSection({
             <KanbanColumn
               key={column.id}
               column={column}
+              labels={board.labels}
               commentCounts={commentCounts}
               draggingTaskId={draggingTaskId}
               dropTarget={dropTarget}
@@ -1227,6 +1235,7 @@ function ActiveCollaborators() {
 
 function KanbanColumn({
   column,
+  labels,
   commentCounts,
   draggingTaskId,
   dropTarget,
@@ -1241,6 +1250,7 @@ function KanbanColumn({
   onOpenTaskComments,
 }: {
   column: KanbanColumnRecord;
+  labels: CategoryOption[];
   commentCounts: Map<number, number>;
   draggingTaskId: number | null;
   dropTarget: DropTarget | null;
@@ -1315,6 +1325,7 @@ function KanbanColumn({
               dropTarget.position === "before" && <DropLine />}
             <TaskCard
               task={task}
+              labels={labels}
               commentCount={commentCounts.get(task.id) ?? 0}
               isDragging={draggingTaskId === task.id}
               onDragStart={onDragStart}
@@ -1336,6 +1347,7 @@ function KanbanColumn({
 
 function TaskCard({
   task,
+  labels,
   commentCount,
   isDragging,
   onDragStart,
@@ -1344,6 +1356,7 @@ function TaskCard({
   onCommentClick,
 }: {
   task: KanbanTaskRecord;
+  labels: CategoryOption[];
   commentCount: number;
   isDragging: boolean;
   onDragStart: (event: React.DragEvent, task: KanbanTaskRecord) => void;
@@ -1402,12 +1415,12 @@ function TaskCard({
       {task.labelIds.length > 0 && (
         <div className="mb-2 flex flex-wrap gap-1.5">
           {task.labelIds.map((labelId) => {
-            const label = getKanbanLabelMeta(labelId);
+            const label = getKanbanLabelMeta(labelId, labels);
             if (!label) return null;
 
             return (
               <span
-                key={label.id}
+                key={labelId}
                 className="inline-flex items-center gap-1 rounded-full border px-2 py-1 text-[10px] font-semibold"
                 style={{
                   borderColor: label.border,
@@ -1470,6 +1483,7 @@ function DropLine() {
 
 function TaskDialogModal({
   boardId,
+  labels,
   taskDialog,
   taskDialogTab,
   taskForm,
@@ -1483,6 +1497,7 @@ function TaskDialogModal({
   onSaveTask,
 }: {
   boardId: number;
+  labels: CategoryOption[];
   taskDialog: TaskDialogState;
   taskDialogTab: TaskDialogTab;
   taskForm: TaskFormState;
@@ -1622,13 +1637,13 @@ function TaskDialogModal({
                 Labels
               </span>
               <div className="flex flex-wrap gap-2">
-                {KANBAN_LABELS.map((label) => {
-                  const selected = taskForm.labelIds.includes(label.id);
+                {labels.map((label) => {
+                  const selected = taskForm.labelIds.includes(label.key);
 
                   return (
                     <button
-                      key={label.id}
-                      onClick={() => onToggleLabel(label.id)}
+                      key={label.key}
+                      onClick={() => onToggleLabel(label.key)}
                       className={cn(
                         "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1.5 text-[11px] font-semibold transition",
                         selected && "shadow-sm"
@@ -1644,6 +1659,11 @@ function TaskDialogModal({
                     </button>
                   );
                 })}
+                {labels.length === 0 && (
+                  <span className="rounded-xl border border-dashed border-slate-200 px-3 py-2 text-[11px] font-semibold text-slate-400">
+                    Add task categories in Settings.
+                  </span>
+                )}
               </div>
             </div>
 

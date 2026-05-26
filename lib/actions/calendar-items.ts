@@ -5,17 +5,15 @@ import { and, asc, desc, eq } from "drizzle-orm";
 import { db } from "@/db";
 import { calendarItems, type CalendarItem } from "@/db/schema";
 import { syncUser } from "@/lib/actions/sync-user";
+import { getCategoryOptionsForUser } from "@/lib/settings-data";
 import {
-  CALENDAR_CATEGORY_OPTIONS,
   CALENDAR_ITEM_TYPES,
-  DEFAULT_CALENDAR_CATEGORY,
   type CalendarCategory,
   type CalendarItemFormInput,
   type CalendarItemRecord,
   type CalendarItemType,
 } from "@/lib/calendar";
-
-const categoryValues = CALENDAR_CATEGORY_OPTIONS.map((option) => option.value);
+import { getDefaultCategoryKey } from "@/lib/settings";
 
 async function getAppUser(required = true) {
   const user = await syncUser();
@@ -50,12 +48,19 @@ function normalizeItemType(itemType: string | null | undefined): CalendarItemTyp
   return "task";
 }
 
-function normalizeCategory(category: string | null | undefined): CalendarCategory {
-  if (categoryValues.includes(category as CalendarCategory)) {
-    return category as CalendarCategory;
+async function normalizeCategory(
+  userId: number,
+  itemType: CalendarItemType,
+  category: string | null | undefined
+): Promise<CalendarCategory> {
+  const scope = itemType === "reminder" ? "reminders" : "calendar";
+  const categories = await getCategoryOptionsForUser(userId, scope);
+
+  if (category && categories.some((option) => option.key === category)) {
+    return category;
   }
 
-  return DEFAULT_CALENDAR_CATEGORY;
+  return getDefaultCategoryKey(scope);
 }
 
 function normalizeDate(date: string | null | undefined) {
@@ -91,7 +96,7 @@ function toCalendarRecord(item: CalendarItem): CalendarItemRecord {
     title: item.title,
     description: item.description,
     itemType: normalizeItemType(item.itemType),
-    category: normalizeCategory(item.category),
+    category: item.category,
     scheduledDate: item.scheduledDate,
     scheduledTime: item.scheduledTime,
     createdAt: item.createdAt.toISOString(),
@@ -99,12 +104,14 @@ function toCalendarRecord(item: CalendarItem): CalendarItemRecord {
   };
 }
 
-function normalizeInput(input: CalendarItemFormInput) {
+async function normalizeInput(userId: number, input: CalendarItemFormInput) {
+  const itemType = normalizeItemType(input.itemType);
+
   return {
     title: normalizeTitle(input.title),
     description: cleanText(input.description, 400),
-    itemType: normalizeItemType(input.itemType),
-    category: normalizeCategory(input.category),
+    itemType,
+    category: await normalizeCategory(userId, itemType, input.category),
     scheduledDate: normalizeDate(input.scheduledDate),
     scheduledTime: normalizeTime(input.scheduledTime),
   };
@@ -144,7 +151,7 @@ export async function fetchCalendarItems() {
 
 export async function createScheduledCalendarItem(input: CalendarItemFormInput) {
   const user = await getAppUser();
-  const values = normalizeInput(input);
+  const values = await normalizeInput(user!.id, input);
 
   if (!values.scheduledDate) {
     throw new Error("Choose a date before scheduling this item.");
@@ -164,7 +171,7 @@ export async function createScheduledCalendarItem(input: CalendarItemFormInput) 
 
 export async function createDraftCalendarItem(input: CalendarItemFormInput) {
   const user = await getAppUser();
-  const values = normalizeInput(input);
+  const values = await normalizeInput(user!.id, input);
 
   const [created] = await db
     .insert(calendarItems)
@@ -222,7 +229,7 @@ export async function rescheduleCalendarItem(id: number, scheduledDate: string) 
 export async function updateCalendarItem(id: number, input: CalendarItemFormInput) {
   const user = await getAppUser();
   await assertOwnedItem(id, user!.id);
-  const values = normalizeInput(input);
+  const values = await normalizeInput(user!.id, input);
 
   const [updated] = await db
     .update(calendarItems)
